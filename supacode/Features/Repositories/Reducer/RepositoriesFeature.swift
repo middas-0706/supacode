@@ -34,7 +34,6 @@ private enum CancelID {
 }
 
 nonisolated let repositoriesLogger = SupaLogger("Repositories")
-private nonisolated let githubIntegrationRecoveryInterval: Duration = .seconds(15)
 private nonisolated let toastAutoDismissDelay: Duration = .milliseconds(2500)
 private nonisolated let delayedPullRequestRefreshDelay: Duration = .seconds(2)
 
@@ -209,6 +208,9 @@ struct RepositoriesFeature {
     var inspectorPane: WorktreeInspectorPane = .git
     var fileExplorer = FileExplorerFeature.State()
     var githubIntegrationAvailability: GithubIntegrationAvailability = .unknown
+    /// Consecutive failed availability probes, indexing the recovery backoff. Held
+    /// in state so it survives the poll effect being re-created each cycle.
+    var githubIntegrationRecoveryAttempt = 0
     var pendingPullRequestRefreshByRepositoryID: [Repository.ID: PendingPullRequestRefresh] = [:]
     var inFlightPullRequestRefreshRepositoryIDs: Set<Repository.ID> = []
     /// Forge serving each repository, cached from the last refresh resolution;
@@ -2496,18 +2498,22 @@ struct RepositoriesFeature {
           state.inFlightPullRequestBranchSnapshotsByRepositoryID.removeAll()
           let openFetchCancels = Self.cancelPullRequestOpenFetches(&state)
           let clock = clock
+          // Each probe re-arms this via `refreshGithubIntegrationAvailability`, so
+          // one delayed tick per cycle is enough; the attempt lives in state so the
+          // backoff decays instead of restarting at 15s.
+          let delay = Self.githubRecoveryDelay(attempt: state.githubIntegrationRecoveryAttempt)
+          state.githubIntegrationRecoveryAttempt += 1
           return .merge(
             openFetchCancels + [
               .run { send in
-                while !Task.isCancelled {
-                  try await clock.sleep(for: githubIntegrationRecoveryInterval)
-                  await send(.refreshGithubIntegrationAvailability)
-                }
+                try await clock.sleep(for: delay)
+                await send(.refreshGithubIntegrationAvailability)
               }
               .cancellable(id: CancelID.githubIntegrationRecovery, cancelInFlight: true)
             ]
           )
         }
+        state.githubIntegrationRecoveryAttempt = 0
         let pendingRefreshes = state.pendingPullRequestRefreshByRepositoryID.values.sorted {
           $0.repositoryRootURL.path(percentEncoded: false)
             < $1.repositoryRootURL.path(percentEncoded: false)
@@ -3083,6 +3089,7 @@ struct RepositoriesFeature {
       case .setGithubIntegrationEnabled(let isEnabled):
         if isEnabled {
           state.githubIntegrationAvailability = .unknown
+          state.githubIntegrationRecoveryAttempt = 0
           state.pendingPullRequestRefreshByRepositoryID.removeAll()
           state.queuedPullRequestRefreshByRepositoryID.removeAll()
           state.inFlightPullRequestRefreshRepositoryIDs.removeAll()
@@ -3099,6 +3106,7 @@ struct RepositoriesFeature {
           )
         }
         state.githubIntegrationAvailability = .disabled
+        state.githubIntegrationRecoveryAttempt = 0
         state.pendingPullRequestRefreshByRepositoryID.removeAll()
         state.queuedPullRequestRefreshByRepositoryID.removeAll()
         state.inFlightPullRequestRefreshRepositoryIDs.removeAll()
@@ -5010,6 +5018,15 @@ struct RepositoriesFeature {
     let repoID: Repository.ID
     let host: RemoteHost
     let remotePath: String
+  }
+
+  /// Backoff for the GitHub-integration recovery poll: 15s, 30s, 60s, 120s, 240s,
+  /// then 300s. Avoids hammering `gh` every 15s forever when the CLI is
+  /// persistently unavailable. The first delay stays 15s (attempt 0).
+  private static func githubRecoveryDelay(attempt: Int) -> Duration {
+    let cappedAttempt = min(attempt, 5)
+    let seconds = min(15 * (1 << cappedAttempt), 300)
+    return .seconds(seconds)
   }
 
   private struct WorktreesFetchResult: Sendable {
