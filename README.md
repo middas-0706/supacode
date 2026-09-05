@@ -123,27 +123,6 @@ make test    # run the tests
 make format  # swift-format only
 ```
 
-For a focused test run, pass Xcode options through `XCODEBUILD_FLAGS`; the same
-selection applies in a terminal and when an agent captures the output:
-
-```bash
-make test XCODEBUILD_FLAGS='-only-testing:supacodeGitTests/GitStatusParserTests'
-```
-
-The file decoration model also has a standalone verification loop requiring
-Swift 6.2+ but no Ghostty build or Tuist packages:
-
-```bash
-scripts/verify-git-decoration.sh main  # baseline source, current regression tests
-scripts/verify-git-decoration.sh       # working source, same tests and benchmark
-```
-
-This runs `GitStatusParserTests` against the actual model source, then measures
-10,000 row decorations at several ignored-root counts in an optimized build.
-Compare serial runs on the same machine; the median excludes one warmup sample.
-It measures model lookup cost, not scrolling performance or Git subprocesses,
-and does not replace `make test` or `make build-app`.
-
 ## Technical stack
 
 - [The Composable Architecture](https://github.com/pointfreeco/swift-composable-architecture)
